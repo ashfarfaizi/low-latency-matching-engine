@@ -15,11 +15,12 @@ target_include_directories(lob INTERFACE include)
 target_compile_options(lob INTERFACE -Wall -Wextra -Wpedantic)
 
 # ── Tests ──────────────────────────────────────────────────────────────────
-set(LOB_TEST_TARGETS lob_tests lob_engine_tests lob_wire_tests lob_replay_tests)
+set(LOB_TEST_TARGETS lob_tests lob_engine_tests lob_wire_tests lob_replay_tests lob_wasm_api_tests)
 add_executable(lob_tests tests/test_order_book.cpp)
 add_executable(lob_engine_tests tests/test_engine.cpp)
 add_executable(lob_wire_tests tests/test_wire.cpp)
 add_executable(lob_replay_tests tests/test_replay.cpp)
+add_executable(lob_wasm_api_tests tests/test_wasm_api.cpp wasm/lob_wasm.cpp)
 foreach(t ${LOB_TEST_TARGETS})
   target_link_libraries(${t} PRIVATE lob Threads::Threads)
 endforeach()

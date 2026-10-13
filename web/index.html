@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Low-Latency Matching Engine</title>
+    <meta name="description" content="A C++20 limit-order-book matching engine, compiled to WebAssembly. Place orders against the real engine in your browser." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231e2329'/%3E%3Crect x='3' y='3' width='4' height='2' fill='%23e5484d'/%3E%3Crect x='3' y='6' width='7' height='2' fill='%23e5484d'/%3E%3Crect x='3' y='9' width='8' height='2' fill='%2330a46c'/%3E%3Crect x='3' y='12' width='5' height='2' fill='%2330a46c'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <strong>Low-Latency Matching Engine</strong>
+        <span class="muted">C++20 order book, running in your browser as WebAssembly</span>
+      </div>
+      <a class="btn ghost" href="https://github.com/ashfarfaizi/low-latency-matching-engine" target="_blank" rel="noreferrer">Source on GitHub</a>
+    </header>
+
+    <main>
+      <p class="intro">
+        This page runs the engine's actual order book (<code>order_book.hpp</code>) compiled to WebAssembly. Place an order and
+        it is matched by price, then by arrival time, against the book on the right. A simulated market keeps the book moving.
+      </p>
+
+      <div id="loading" class="notice">Loading the engine…</div>
+
+      <div class="grid" id="app" hidden>
+        <section class="panel" aria-labelledby="h-order">
+          <h2 id="h-order">Place an order</h2>
+          <form id="order-form" autocomplete="off">
+            <div class="seg" role="group" aria-label="Side">
+              <button type="button" class="on buy" data-side="0">Buy</button>
+              <button type="button" class="sell" data-side="1">Sell</button>
+            </div>
+            <label>Price <input id="price" type="number" min="1" max="20000" step="1" required /></label>
+            <label>Quantity <input id="qty" type="number" min="1" max="100000" step="1" value="25" required /></label>
+            <div class="seg small" role="group" aria-label="Order type">
+              <button type="button" class="on" data-type="0">Limit</button>
+              <button type="button" data-type="1">Immediate or cancel</button>
+            </div>
+            <button id="submit" class="btn primary buy" type="submit">Buy 25 @ –</button>
+            <p class="hint" id="type-hint">A limit order fills what it can and leaves the rest in the book.</p>
+          </form>
+          <p id="result" class="result" aria-live="polite"></p>
+
+          <h3>Your resting orders</h3>
+          <ul id="mine" class="mine"><li class="muted">None yet.</li></ul>
+
+          <h3>Simulated market</h3>
+          <div class="sim">
+            <button id="sim-toggle" class="btn ghost" type="button">Pause</button>
+            <label class="inline">Speed
+              <select id="sim-rate">
+                <option value="20">20 orders/s</option>
+                <option value="100" selected>100 orders/s</option>
+                <option value="1000">1,000 orders/s</option>
+                <option value="10000">10,000 orders/s</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="h-book">
+          <div class="panel-head">
+            <h2 id="h-book">Order book</h2>
+            <span class="muted small" id="book-stats"></span>
+          </div>
+          <div class="ladder" id="ladder">
+            <div class="ladder-head"><span>Price</span><span>Quantity</span></div>
+            <div id="asks"></div>
+            <div class="spread" id="spread">–</div>
+            <div id="bids"></div>
+          </div>
+          <p class="hint">Select a price to copy it into the order form.</p>
+        </section>
+
+        <section class="panel" aria-labelledby="h-trades">
+          <h2 id="h-trades">Trades</h2>
+          <div class="tape-head"><span>Price</span><span>Qty</span><span>Time</span></div>
+          <ol id="tape" class="tape"></ol>
+        </section>
+      </div>
+
+      <section class="panel bench" id="bench" hidden aria-labelledby="h-bench">
+        <div class="panel-head">
+          <h2 id="h-bench">Benchmark it in your browser</h2>
+          <button id="bench-run" class="btn primary" type="button">Run 1,000,000 orders</button>
+        </div>
+        <p class="hint">
+          Runs the repository's benchmark workload on a private book with 100k resting orders: passive adds, cancels of random
+          live orders, and aggressive orders that sweep levels. Browsers coarsen timers, so this times each phase as a whole and
+          reports the average per operation.
+        </p>
+        <table class="bench-table">
+          <thead>
+            <tr><th>Operation</th><th>Your browser (WebAssembly)</th><th>Same benchmark, native C++</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Add a resting order</td><td id="b-add">–</td><td>17 ns</td></tr>
+            <tr><td>Cancel a random live order</td><td id="b-cancel">–</td><td>60 ns</td></tr>
+            <tr><td>Aggressive order sweeping levels</td><td id="b-ioc">–</td><td>165 ns</td></tr>
+            <tr><td>Throughput</td><td id="b-tput">–</td><td>–</td></tr>
+          </tbody>
+        </table>
+        <p class="hint">Native figures: average per operation, measured on a 2-vCPU cloud VM. Percentile latencies (p50/p99) are in the README.</p>
+      </section>
+
+      <section class="about" aria-labelledby="h-about">
+        <h2 id="h-about">What runs where</h2>
+        <p>
+          In your browser: the order book and matching logic, exactly as in the repository. That includes the flat price
+          ladder, the intrusive first-in-first-out queue at each price, O(1) cancel by order id, and the pre-allocated order pool.
+        </p>
+        <p>
+          On Linux, natively: the full system around it. A TCP gateway built on epoll hands orders to a matching thread pinned
+          to its own core through lock-free single-producer/single-consumer queues. Book changes go out as UDP market data with
+          sequence numbers, and every command is journaled so a session can be replayed exactly. That part needs raw sockets and
+          dedicated cores, which a web host can't provide, so it is documented and tested in the repository instead.
+        </p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span>Built by <a href="https://github.com/ashfarfaizi" target="_blank" rel="noreferrer">Ashfar Faizi</a></span>
+      <span class="muted">C++20, Emscripten, plain JavaScript</span>
+    </footer>
+
+    <script src="lob.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
