@@ -75,7 +75,16 @@
       trades++;
       tape.unshift({ p, q, side, you: fromUser || mine.has(maker), t: new Date() });
       lastTradePrice = p;
-      if (mine.has(maker) && api.openQty(maker) === 0) mine.delete(maker);
+      if (mine.has(maker)) {
+        const open = api.openQty(maker);
+        if (!fromUser) {
+          setResult(
+            `Your order #${maker} traded ${fmtInt(q)} at ${p}${open ? `; ${fmtInt(open)} still resting.` : ' and is now fully filled.'}`,
+            true,
+          );
+        }
+        if (open === 0) mine.delete(maker);
+      }
     }
     if (tape.length > 60) tape.length = 60;
     const resting = api.resting();

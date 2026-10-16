@@ -1,5 +1,7 @@
 # Low-Latency Matching Engine (C++20, Linux)
 
+**Try it live: [low-latency-matching-engine.vercel.app](https://low-latency-matching-engine.vercel.app).** The order book is compiled to WebAssembly, so you can place orders against the real engine and benchmark it in your browser.
+
 A limit-order-book exchange core written for predictable low latency. Clients send orders over **TCP** in a binary protocol. A **lock-free** queue hands them to a **pinned matching thread**. Fills come back over TCP, and book changes are published as **UDP market data** with gapless sequence numbers. Every command is **journaled**, and a replay tool proves the live run can be reproduced exactly.
 
 About 3,000 lines of C++20, with no dependencies beyond the standard library and POSIX.
@@ -26,6 +28,7 @@ About 3,000 lines of C++20, with no dependencies beyond the standard library and
 | **v2: lock-free gateway** | Single-producer/single-consumer ring buffers (head and tail on separate cache lines, each side caching the other's index) between the gateway thread and the engine thread, pinned to separate cores. Market-data level updates carry gapless sequence numbers. | 5M items across threads arrive in order. The **threaded engine's events are identical to a single-threaded run**. Clean under **ThreadSanitizer**. |
 | **v3: networking** | Binary wire protocol, encoded with `memcpy` and no packed structs, plus a stream reassembler for frames split across reads. epoll gateway with adaptive polling: it spins while orders are in flight and blocks when idle. Per-session routing, **order ownership** (a client can't cancel another's order), maker fill notifications, and UDP market data batched up to 100 updates per datagram. | Wire tests (including byte-by-byte delivery and malformed frames). `lob_client selftest` checks ownership, fills and cancels end to end. The listener reports **0 sequence gaps** and rebuilds the book. |
 | **v4: journal and replay** | Append-only command journal written by the single producer, so journal order is engine order. A 64-bit FNV-1a digest is computed over every event, and `lob_replay` re-runs the journal single-threaded. | **The replay digest equals the live server's digest** (for example, 550k commands produced 1.68M events, both with digest `f65078e7459095f4`). The replayed final book matches the book the UDP listener rebuilt. |
+| **Browser demo** | `order_book.hpp` compiled to WebAssembly with Emscripten behind a thin C API (`wasm/lob_wasm.cpp`). The page offers order entry, a live price ladder, a trade tape, a simulated market, and the benchmark workload running in the browser. Vercel installs Emscripten and builds it on every push. | Native tests of the C API (`tests/test_wasm_api.cpp`); verified in a browser on the deployed site. |
 | **CI** | GitHub Actions: GCC and clang × Release, ASan+UBSan and TSan, warnings treated as errors, plus the end-to-end script. | `.github/workflows/ci.yml` |
 
 ## Measured performance
@@ -100,6 +103,9 @@ src/server.cpp               epoll gateway + engine thread + UDP publisher
 src/client.cpp               latency / flood / selftest client
 src/md_listener.cpp          market-data listener with gap detection
 src/replay.cpp               deterministic journal replay
+wasm/lob_wasm.cpp            C API over the order book for the WebAssembly build
+web/                         browser demo (order entry, ladder, trades, benchmark)
+scripts/build-wasm.sh        Emscripten build used by Vercel
 tests/                       order book, engine/SPSC, wire, replay
 bench/                       order book, SPSC baseline, engine round trip
 scripts/e2e.sh               full-system test used by CI
