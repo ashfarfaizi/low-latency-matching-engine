@@ -10,7 +10,11 @@ EMSDK_VERSION="${EMSDK_VERSION:-4.0.10}"
 
 if ! command -v em++ >/dev/null 2>&1; then
   echo "== installing Emscripten $EMSDK_VERSION"
-  [ -d "$EMSDK_DIR" ] || git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$EMSDK_DIR"
+  # A build cache can restore a partial directory; trust it only if the emsdk tool is there.
+  if [ ! -x "$EMSDK_DIR/emsdk" ]; then
+    rm -rf "$EMSDK_DIR"
+    git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$EMSDK_DIR"
+  fi
   pushd "$EMSDK_DIR" >/dev/null
   if ! (./emsdk install "$EMSDK_VERSION" && ./emsdk activate "$EMSDK_VERSION"); then
     echo "== $EMSDK_VERSION unavailable, using latest"
