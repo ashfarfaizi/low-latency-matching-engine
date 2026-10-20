@@ -96,6 +96,9 @@ class OrderBook {
   std::size_t resting_orders() const { return pool_.size() - free_.size(); }
   bool is_resting(OrderId id) const { return id != kNoOrder && id < next_id_ && id_to_slot_[id] != kNil; }
   Qty open_qty(OrderId id) const { return is_resting(id) ? pool_[id_to_slot_[id]].qty : 0; }
+  /// Side / price of a resting order. Only valid if is_resting(id).
+  Side side_of(OrderId id) const { return pool_[id_to_slot_[id]].side; }
+  Price price_of(OrderId id) const { return pool_[id_to_slot_[id]].price; }
 
   /// Order ids at a price level, front of the queue first (for tests/tools).
   std::vector<OrderId> queue_at(Side side, Price p) const {
