@@ -8,29 +8,43 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
+find_package(Threads REQUIRED)
+
 add_library(lob INTERFACE)
 target_include_directories(lob INTERFACE include)
 target_compile_options(lob INTERFACE -Wall -Wextra -Wpedantic)
 
+# ── Tests ──────────────────────────────────────────────────────────────────
+set(LOB_TEST_TARGETS lob_tests lob_engine_tests lob_wire_tests)
 add_executable(lob_tests tests/test_order_book.cpp)
-target_link_libraries(lob_tests PRIVATE lob)
-
-find_package(Threads REQUIRED)
-
 add_executable(lob_engine_tests tests/test_engine.cpp)
-target_link_libraries(lob_engine_tests PRIVATE lob Threads::Threads)
+add_executable(lob_wire_tests tests/test_wire.cpp)
+foreach(t ${LOB_TEST_TARGETS})
+  target_link_libraries(${t} PRIVATE lob Threads::Threads)
+endforeach()
 
+# ── Benchmarks ─────────────────────────────────────────────────────────────
 add_executable(lob_bench bench/bench_order_book.cpp)
-target_link_libraries(lob_bench PRIVATE lob)
-target_compile_options(lob_bench PRIVATE -O3 -march=native)
-
 add_executable(lob_bench_engine bench/bench_engine.cpp)
-target_link_libraries(lob_bench_engine PRIVATE lob Threads::Threads)
-target_compile_options(lob_bench_engine PRIVATE -O3 -march=native)
+add_executable(lob_bench_spsc bench/bench_spsc.cpp)
+foreach(t lob_bench lob_bench_engine lob_bench_spsc)
+  target_link_libraries(${t} PRIVATE lob Threads::Threads)
+  target_compile_options(${t} PRIVATE -O3 -march=native)
+endforeach()
 
+# ── Server and tools ───────────────────────────────────────────────────────
+add_executable(lob_server src/server.cpp)
+target_compile_options(lob_server PRIVATE -O3 -march=native)
+add_executable(lob_client src/client.cpp)
+add_executable(lob_md_listen src/md_listener.cpp)
+foreach(t lob_server lob_client lob_md_listen)
+  target_link_libraries(${t} PRIVATE lob Threads::Threads)
+endforeach()
+
+# ── Sanitizers ─────────────────────────────────────────────────────────────
 option(LOB_SANITIZE "Build tests with ASan + UBSan" OFF)
 if(LOB_SANITIZE)
-  foreach(t lob_tests lob_engine_tests)
+  foreach(t ${LOB_TEST_TARGETS})
     target_compile_options(${t} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g)
     target_link_options(${t} PRIVATE -fsanitize=address,undefined)
   endforeach()
@@ -43,9 +57,6 @@ if(LOB_TSAN)
 endif()
 
 enable_testing()
-add_test(NAME lob_tests COMMAND lob_tests)
-add_test(NAME lob_engine_tests COMMAND lob_engine_tests)
-
-add_executable(lob_bench_spsc bench/bench_spsc.cpp)
-target_link_libraries(lob_bench_spsc PRIVATE lob Threads::Threads)
-target_compile_options(lob_bench_spsc PRIVATE -O3 -march=native)
+foreach(t ${LOB_TEST_TARGETS})
+  add_test(NAME ${t} COMMAND ${t})
+endforeach()
