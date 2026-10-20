@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    name: ${{ matrix.compiler }} / ${{ matrix.mode }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [g++, clang++]
+        mode: [release, asan, tsan]
+    env:
+      CXX: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Allow ThreadSanitizer on newer kernels
+        if: matrix.mode == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Configure
+        run: |
+          case "${{ matrix.mode }}" in
+            release) FLAGS="-DCMAKE_BUILD_TYPE=Release" ;;
+            asan)    FLAGS="-DCMAKE_BUILD_TYPE=Debug -DLOB_SANITIZE=ON" ;;
+            tsan)    FLAGS="-DCMAKE_BUILD_TYPE=Debug -DLOB_TSAN=ON" ;;
+          esac
+          cmake -S . -B build $FLAGS -DCMAKE_CXX_FLAGS="-Werror"
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Unit, concurrency and replay tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: End-to-end (TCP orders, UDP market data, journal replay)
+        if: matrix.mode == 'release'
+        run: ./scripts/e2e.sh
+
+      - name: Benchmarks (indicative only on shared CI runners)
+        if: matrix.mode == 'release' && matrix.compiler == 'g++'
+        run: |
+          ./build/lob_bench 1000000 1
+          ./build/lob_bench_spsc 500000 0 1
+          ./build/lob_bench_engine 200000 2000000 0 1

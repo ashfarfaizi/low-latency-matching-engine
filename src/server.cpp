@@ -10,10 +10,15 @@
 // are in flight the gateway spins on epoll with a 0 ms timeout; when idle it
 // blocks for up to 1 ms so it does not burn a core.
 //
-// Usage: lob_server [--port 9000] [--md 127.0.0.1:9001] [--gw-cpu 0] [--engine-cpu 1]
+// Every command sent to the engine can be journaled (--journal file) and every
+// event is folded into a digest, so `lob_replay file` can prove the live run
+// is reproduced exactly.
+//
+// Usage: lob_server [--port 9000] [--md 127.0.0.1:9001] [--gw-cpu 0] [--engine-cpu 1] [--journal path]
 
 #include <sys/epoll.h>
 
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <memory>
@@ -22,6 +27,7 @@
 #include <vector>
 
 #include "lob/engine.hpp"
+#include "lob/journal.hpp"
 #include "lob/wire.hpp"
 #include "net.hpp"
 
@@ -49,8 +55,8 @@ struct Stats {
 
 class Gateway {
  public:
-  Gateway(MatchingEngine& eng, int listen_fd, int md_fd, sockaddr_in md_dst)
-      : eng_(eng), listen_fd_(listen_fd), md_fd_(md_fd), md_dst_(md_dst) {
+  Gateway(MatchingEngine& eng, int listen_fd, int md_fd, sockaddr_in md_dst, JournalWriter* journal)
+      : eng_(eng), listen_fd_(listen_fd), md_fd_(md_fd), md_dst_(md_dst), journal_(journal) {
     ep_ = epoll_create1(0);
     if (ep_ < 0) net::die("epoll_create1");
     add(listen_fd_, EPOLLIN, nullptr);
@@ -81,10 +87,22 @@ class Gateway {
       pump_events();
       flush_dirty();
       flush_md();
+      if (journal_ && !outstanding_ && n == 0) journal_->flush();  // idle: push journal to the OS
     }
+    // Shutdown: collect every event the engine still owes us so the digest is complete.
+    auto idle_since = std::chrono::steady_clock::now();
+    while (outstanding_ || std::chrono::steady_clock::now() - idle_since < std::chrono::milliseconds(50)) {
+      const auto before = digest_.count();
+      pump_events();
+      if (digest_.count() != before) idle_since = std::chrono::steady_clock::now();
+    }
+    flush_dirty();
+    flush_md();
+    if (journal_) journal_->flush();
   }
 
   const Stats& stats() const { return st_; }
+  const EventDigest& digest() const { return digest_; }
 
  private:
   void add(int fd, std::uint32_t events, void* ptr) {
@@ -147,6 +165,7 @@ class Gateway {
 
   void send_to_engine(const Command& cmd) {
     while (!eng_.try_send(cmd)) pump_events();  // never block while the engine waits on us
+    if (journal_) journal_->append(cmd);           // single producer: journal order == engine order
     ++outstanding_;
     ++st_.commands;
   }
@@ -189,6 +208,7 @@ class Gateway {
   void pump_events() {
     Event e;
     while (eng_.poll(e)) {
+      digest_.add(e);
       switch (e.type) {
         case Event::Type::Ack: {
           --outstanding_;
@@ -289,6 +309,8 @@ class Gateway {
   std::vector<std::uint32_t> owner_;  // order id -> session that owns it
   std::uint64_t outstanding_ = 0;    // commands sent to the engine without a reply yet
   wire::MdBatch md_;
+  JournalWriter* journal_;
+  EventDigest digest_;
   Stats st_;
 };
 
@@ -305,6 +327,7 @@ int main(int argc, char** argv) {
   const std::string md = arg(argc, argv, "--md", "127.0.0.1:9001");
   const int gw_cpu = std::stoi(arg(argc, argv, "--gw-cpu", "0"));
   const int engine_cpu = std::stoi(arg(argc, argv, "--engine-cpu", "1"));
+  const std::string journal_path = arg(argc, argv, "--journal", "");
   const auto colon = md.find(':');
   const std::string md_host = md.substr(0, colon);
   const auto md_port = static_cast<std::uint16_t>(std::stoi(md.substr(colon + 1)));
@@ -325,7 +348,9 @@ int main(int argc, char** argv) {
 
   const int lfd = net::tcp_listen(port);
   const int mfd = net::udp_sender(md_host);
-  Gateway gw(engine, lfd, mfd, net::make_addr(md_host, md_port));
+  std::unique_ptr<JournalWriter> journal;
+  if (!journal_path.empty()) journal = std::make_unique<JournalWriter>(journal_path);
+  Gateway gw(engine, lfd, mfd, net::make_addr(md_host, md_port), journal.get());
   std::printf("lob_server: orders on tcp :%u, market data to udp %s:%u, gateway cpu %d, engine cpu %d\n", port, md_host.c_str(),
               md_port, gw_cpu, engine_cpu);
   std::fflush(stdout);
@@ -342,5 +367,7 @@ int main(int argc, char** argv) {
       (unsigned long long)s.sessions, (unsigned long long)s.commands, (unsigned long long)s.acks, (unsigned long long)s.fills,
       (unsigned long long)s.cancels, (unsigned long long)s.rejects, (unsigned long long)s.owner_rejects,
       (unsigned long long)s.md_updates, (unsigned long long)s.md_datagrams);
+  std::printf("event digest %016llx over %llu events%s\n", (unsigned long long)gw.digest().value(),
+              (unsigned long long)gw.digest().count(), journal ? " (journal written)" : "");
   return 0;
 }

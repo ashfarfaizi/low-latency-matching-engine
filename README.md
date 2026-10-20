@@ -1,64 +1,114 @@
 # Low-Latency Matching Engine (C++20, Linux)
 
-A limit-order-book matching engine built for predictable, low latency. This is the core component of an exchange or a trading system's simulator.
+A limit-order-book exchange core written for predictable low latency. Clients send orders over **TCP** in a binary protocol. A **lock-free** queue hands them to a **pinned matching thread**. Fills come back over TCP, and book changes are published as **UDP market data** with gapless sequence numbers. Every command is **journaled**, and a replay tool proves the live run can be reproduced exactly.
 
-**Status: in active development.** Version 1 (the order book and matching core) is done and tested. The concurrency and networking layers are next.
+About 3,000 lines of C++20, with no dependencies beyond the standard library and POSIX.
 
-## What's done (v1)
+```
+                      ┌──────────────── lob_server ─────────────────┐
+ lob_client ──TCP──▶  │ gateway thread (epoll)                      │
+ (orders)   ◀──TCP──  │   framing · sessions · ownership checks     │
+                      │   journal ──▶ journal.bin                   │
+                      │        │ SPSC ring          ▲ SPSC ring     │
+                      │        ▼                    │               │
+                      │ engine thread (pinned core, busy-poll)      │
+                      │   OrderBook: price-time priority, O(1) ops  │
+                      └───────────────┬─────────────────────────────┘
+                                      └──UDP──▶ lob_md_listen (gap detection, book rebuild)
+ lob_replay journal.bin  ──▶ same events, same digest as the live run
+```
 
-- **Price-time priority matching.** The best price fills first, and orders at the same price fill in arrival order (FIFO). Trades execute at the resting order's price. Limit and IOC (immediate-or-cancel) orders.
-- **O(1) add-to-level and O(1) cancel**, with no tree lookups:
-  - the price ladder is a flat array, one level per tick, so finding a level is an index;
-  - each level is an intrusive doubly-linked FIFO, so tail append and middle unlink are both O(1);
-  - an `id → slot` table finds any order for cancel in O(1).
-- **No heap allocation on the hot path.** Orders live in a pre-allocated pool with a free list. The id table is pre-sized and pre-touched, so matching never takes a page fault.
-- **Cached best bid and ask.** When the best level empties, the book scans to the next non-empty level. This is cheap when the book is dense near the touch.
-- **Tests:** 9 suites and 1,035 checks, including a **differential fuzz test**. It runs 200,000 random adds, cancels and IOCs against a simple `std::map`-based reference book and asserts identical trades, best prices and full depth. The suite is also clean under AddressSanitizer and UBSan.
-- **Benchmark harness:** times every operation with `rdtscp`, pinned to one CPU core, and reports the 50th to 99.9th percentiles by operation type.
+## Features by version
 
-## Measured latency
+| Version | What | How it's verified |
+|---|---|---|
+| **v1: order book** | Matching by price, then arrival time (FIFO). Limit and IOC orders, trades at the resting order's price. Flat price-ladder array with an intrusive FIFO per level and an `id→slot` table, so add-to-level and cancel are both O(1). Orders come from a pre-allocated pool with a free list, so there is no allocation while matching. | 1,035 checks, including a **differential fuzz test**: 200k random operations against a simple `std::map` reference book, requiring identical trades and depth. |
+| **v2: lock-free gateway** | Single-producer/single-consumer ring buffers (head and tail on separate cache lines, each side caching the other's index) between the gateway thread and the engine thread, pinned to separate cores. Market-data level updates carry gapless sequence numbers. | 5M items across threads arrive in order. The **threaded engine's events are identical to a single-threaded run**. Clean under **ThreadSanitizer**. |
+| **v3: networking** | Binary wire protocol, encoded with `memcpy` and no packed structs, plus a stream reassembler for frames split across reads. epoll gateway with adaptive polling: it spins while orders are in flight and blocks when idle. Per-session routing, **order ownership** (a client can't cancel another's order), maker fill notifications, and UDP market data batched up to 100 updates per datagram. | Wire tests (including byte-by-byte delivery and malformed frames). `lob_client selftest` checks ownership, fills and cancels end to end. The listener reports **0 sequence gaps** and rebuilds the book. |
+| **v4: journal and replay** | Append-only command journal written by the single producer, so journal order is engine order. A 64-bit FNV-1a digest is computed over every event, and `lob_replay` re-runs the journal single-threaded. | **The replay digest equals the live server's digest** (for example, 550k commands produced 1.68M events, both with digest `f65078e7459095f4`). The replayed final book matches the book the UDP listener rebuilt. |
+| **CI** | GitHub Actions: GCC and clang × Release, ASan+UBSan and TSan, warnings treated as errors, plus the end-to-end script. | `.github/workflows/ci.yml` |
 
-Workload: a book pre-filled with 100k orders, then **2,000,000 timed operations**. About 55% are passive adds, 30% cancels of random live orders, and 15% aggressive IOC orders that sweep 1–3 levels. Machine: a 2-vCPU cloud VM (Intel Xeon @ 2.1 GHz), shared, so expect jitter. The numbers include about 22 ns of timer overhead per sample. Ranges cover 3 runs.
+## Measured performance
+
+Machine: a **2-vCPU shared cloud VM** (Intel Xeon @ 2.1 GHz). Expect jitter, and expect better numbers on dedicated hardware. Latencies use `rdtscp` on pinned cores and include about 22 ns of timer overhead. Ranges cover 3 runs.
+
+**Order book alone** (single thread, 2M timed operations on a book of about 100k orders):
 
 | Operation | p50 | p99 | p99.9 |
 |---|---|---|---|
 | Add (rests in book) | 43–44 ns | 85–116 ns | 228–389 ns |
 | Cancel (random live order) | 116–129 ns | 427–490 ns | 569–708 ns |
-| Aggressive IOC (sweeps levels) | 57–60 ns | 338–379 ns | 714–862 ns |
+| Aggressive IOC (sweeps 1–3 levels) | 57–60 ns | 338–379 ns | 714–862 ns |
 
-**Throughput:** about 6–7.5M operations per second on one core, including timing overhead.
+That's 6–7.5M operations per second on one core.
 
-**A tail-latency fix along the way:** the first version grew the id table on demand. That caused a page fault about every 1,024 orders, which put add p99.9 at about 1.5 µs. Pre-sizing and pre-touching the table brought p99.9 down to 230–390 ns, about 5× better.
+**Through the lock-free gateway** (gateway → SPSC → engine → SPSC → gateway, one order in flight):
 
-Cancels are slower than adds because they hit a random order, which usually means a cache miss. Adds append near the hot top of the book.
+| | p50 | p99 |
+|---|---|---|
+| New order round trip | 640–665 ns | 918–968 ns |
+| Cancel round trip | 764–821 ns | 1.28–1.38 µs |
+| Queues only, no engine (core-to-core ping-pong baseline) | 403–457 ns | 531–589 ns |
 
-## Roadmap
+So about two-thirds of the engine round trip on this VM is moving cache lines between cores; matching adds roughly 200 ns. Streaming throughput is **2.1–2.4M commands per second, which produce 6.6–7.5M events per second**.
 
-- [ ] **Lock-free gateway:** an SPSC ring buffer between the network thread and the matching thread, with core pinning, measured end to end.
-- [ ] **TCP order entry:** a compact binary protocol (new, cancel, ack, fill), using epoll.
-- [ ] **UDP multicast market data:** incremental book updates with sequence numbers, plus a gap-detecting client.
-- [ ] **Persistence and replay:** an append-only trade log, and deterministic replay of a recorded session.
-- [ ] **Real data:** replay public exchange L2/L3 data through the engine; a Python harness for a simple market-making strategy.
-- [ ] **Profiling:** `perf` counters (cache misses, branch misses) per operation type; compare against a `std::map` baseline.
+**Over TCP loopback** (client process → kernel → gateway → engine → back):
 
-## Build and run
+- Round trip: p50 about 13 µs and p99 about 40 µs. This is dominated by the kernel TCP stack; kernel-bypass networking is listed under "Next".
+- One pipelined TCP connection: **1.3–2.9M orders per second**, because the load generator shares the VM's 2 cores with the server's two busy threads.
+- Journaling costs less than the run-to-run noise.
+
+**Tail-latency fix:** in v1, the id table grew on demand and page-faulted about every 1,024 orders, which put add p99.9 at about 1.5 µs. Pre-sizing and pre-touching it cut p99.9 to 230–390 ns, about 5× better.
+
+## Build, test, run
 
 ```bash
-cmake -S . -B build
-cmake --build build -j
-./build/lob_tests                 # unit + differential fuzz tests
-./build/lob_bench 2000000 1       # ops, CPU core to pin to
+cmake -S . -B build && cmake --build build -j
+ctest --test-dir build --output-on-failure   # all unit / concurrency / replay tests
+./scripts/e2e.sh                              # full system: TCP, UDP, journal, replay digest
+
+# run it yourself
+./build/lob_server --port 9000 --md 127.0.0.1:9001 --journal session.bin
+./build/lob_md_listen 127.0.0.1 9001
+./build/lob_client latency 100000
+./build/lob_client flood 1000000
+./build/lob_replay session.bin                # digest must equal the server's
+
+# benchmarks
+./build/lob_bench 2000000 1          # order book, pinned to cpu 1
+./build/lob_bench_spsc 1000000 0 1   # queue-only baseline
+./build/lob_bench_engine             # gateway <-> engine round trip + streaming
 
 # sanitizers
-cmake -S . -B build-asan -DLOB_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug
-cmake --build build-asan --target lob_tests && ./build-asan/lob_tests
+cmake -S . -B build-asan -DLOB_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug && cmake --build build-asan -j && ctest --test-dir build-asan
+cmake -S . -B build-tsan -DLOB_TSAN=ON -DCMAKE_BUILD_TYPE=Debug && cmake --build build-tsan -j && ctest --test-dir build-tsan
 ```
+
+UDP market data is sent to any IPv4 address. Use a multicast group (for example `--md 239.1.1.1:9001`) and the listener joins it automatically.
 
 ## Layout
 
 ```
-include/lob/types.hpp       Order ids, prices in integer ticks, trades
-include/lob/order_book.hpp  The order book and matching (header-only)
-tests/test_order_book.cpp   Unit tests + differential fuzz vs reference book
-bench/bench_order_book.cpp  rdtscp latency benchmark, percentiles per op type
+include/lob/types.hpp        ids, integer-tick prices, trades
+include/lob/order_book.hpp   order book and matching (header-only)
+include/lob/spsc_queue.hpp   lock-free single-producer/single-consumer ring buffer
+include/lob/messages.hpp     fixed-size Command / Event structs crossing threads
+include/lob/engine.hpp       matching engine thread, market-data events
+include/lob/wire.hpp         TCP binary protocol, frame reassembly, UDP market-data format
+include/lob/journal.hpp      command journal, event digest
+src/server.cpp               epoll gateway + engine thread + UDP publisher
+src/client.cpp               latency / flood / selftest client
+src/md_listener.cpp          market-data listener with gap detection
+src/replay.cpp               deterministic journal replay
+tests/                       order book, engine/SPSC, wire, replay
+bench/                       order book, SPSC baseline, engine round trip
+scripts/e2e.sh               full-system test used by CI
 ```
+
+## Next
+
+- [ ] Kernel bypass or `io_uring` for order entry, and busy-poll sockets (`SO_BUSY_POLL`), to cut the ~13 µs TCP floor.
+- [ ] Market-data snapshots plus a recovery/retransmit channel for listeners that detect a gap.
+- [ ] Multiple instruments: one engine per symbol, sharded across cores.
+- [ ] Replay real public L2/L3 exchange data, and a Python harness for a simple market-making strategy.
+- [ ] `perf stat` counters (cache misses, branch misses) per operation, and a `std::map` baseline for comparison.
