@@ -10,6 +10,14 @@ endif()
 
 find_package(Threads REQUIRED)
 
+# -march=native tunes benchmarks for the build machine. CI turns it off: the
+# runner CPU varies, and some (e.g. AVX10 parts) make clang 18 warn.
+option(LOB_NATIVE "Optimise benchmarks/server for this CPU (-march=native)" ON)
+set(LOB_FAST_FLAGS -O3)
+if(LOB_NATIVE)
+  list(APPEND LOB_FAST_FLAGS -march=native)
+endif()
+
 add_library(lob INTERFACE)
 target_include_directories(lob INTERFACE include)
 target_compile_options(lob INTERFACE -Wall -Wextra -Wpedantic)
@@ -31,16 +39,16 @@ add_executable(lob_bench_engine bench/bench_engine.cpp)
 add_executable(lob_bench_spsc bench/bench_spsc.cpp)
 foreach(t lob_bench lob_bench_engine lob_bench_spsc)
   target_link_libraries(${t} PRIVATE lob Threads::Threads)
-  target_compile_options(${t} PRIVATE -O3 -march=native)
+  target_compile_options(${t} PRIVATE ${LOB_FAST_FLAGS})
 endforeach()
 
 # ── Server and tools ───────────────────────────────────────────────────────
 add_executable(lob_server src/server.cpp)
-target_compile_options(lob_server PRIVATE -O3 -march=native)
+target_compile_options(lob_server PRIVATE ${LOB_FAST_FLAGS})
 add_executable(lob_client src/client.cpp)
 add_executable(lob_md_listen src/md_listener.cpp)
 add_executable(lob_replay src/replay.cpp)
-target_compile_options(lob_replay PRIVATE -O3 -march=native)
+target_compile_options(lob_replay PRIVATE ${LOB_FAST_FLAGS})
 foreach(t lob_server lob_client lob_md_listen lob_replay)
   target_link_libraries(${t} PRIVATE lob Threads::Threads)
 endforeach()

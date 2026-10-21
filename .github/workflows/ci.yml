@@ -29,7 +29,7 @@ jobs:
             asan)    FLAGS="-DCMAKE_BUILD_TYPE=Debug -DLOB_SANITIZE=ON" ;;
             tsan)    FLAGS="-DCMAKE_BUILD_TYPE=Debug -DLOB_TSAN=ON" ;;
           esac
-          cmake -S . -B build $FLAGS -DCMAKE_CXX_FLAGS="-Werror"
+          cmake -S . -B build $FLAGS -DLOB_NATIVE=OFF -DCMAKE_CXX_FLAGS="-Werror"
 
       - name: Build
         run: cmake --build build -j
