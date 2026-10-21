@@ -110,16 +110,17 @@
       </section>
 
       <section class="about" aria-labelledby="h-about">
-        <h2 id="h-about">What runs where</h2>
+        <h2 id="h-about">What's actually running here</h2>
         <p>
-          In your browser: the order book and matching logic, exactly as in the repository. That includes the flat price
-          ladder, the intrusive first-in-first-out queue at each price, O(1) cancel by order id, and the pre-allocated order pool.
+          The order book you're clicking on is the same C++ code that's in the repo, just compiled to WebAssembly so it runs in
+          your browser. Nothing here is faked: every order, match and cancel goes through <code>order_book.hpp</code>.
         </p>
         <p>
-          On Linux, natively: the full system around it. A TCP gateway built on epoll hands orders to a matching thread pinned
-          to its own core through lock-free single-producer/single-consumer queues. Book changes go out as UDP market data with
-          sequence numbers, and every command is journaled so a session can be replayed exactly. That part needs raw sockets and
-          dedicated cores, which a web host can't provide, so it is documented and tested in the repository instead.
+          The rest of the engine doesn't fit on a website. On Linux there's a TCP server that takes orders, a matching thread
+          pinned to its own CPU core, lock-free queues between the two, UDP market data, and a journal that can replay a whole
+          session exactly. A host like Vercel can't run long-lived servers or open raw sockets, so that part lives in the
+          <a href="https://github.com/ashfarfaizi/low-latency-matching-engine" target="_blank" rel="noreferrer">GitHub repo</a>,
+          along with its tests and benchmarks.
         </p>
       </section>
     </main>
